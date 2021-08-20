@@ -67,8 +67,11 @@ pub struct FeeRateGovernor {
     // What portion of collected fees are to be destroyed, as a fraction of std::u8::MAX
     pub burn_percent: u8,
 }
-
-pub const DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE: u64 = 200_000;
+// Adjusted to match emission schedule 
+// Range is min 50% to 1000% of DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE
+// Solana Target: 50 x 10.000 = 500.000 Lamports per Slot (min 250.000 - max 5.000.000)
+// Safecoin Target: 10 x 50.000 = 500.000 Lamports per Slot (min 250.000 - max 5.000.000)
+pub const DEFAULT_TARGET_LAMPORTS_PER_SIGNATURE: u64 = 50_000;
 pub const DEFAULT_TARGET_SIGNATURES_PER_SLOT: u64 = 10 * DEFAULT_MS_PER_SLOT;
 
 // Percentage of tx fees to burn
