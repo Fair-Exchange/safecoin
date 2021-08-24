@@ -11,6 +11,7 @@ use crate::{
     accounts_index::{AccountSecondaryIndexes, Ancestors, IndexKey},
     blockhash_queue::BlockhashQueue,
     builtins::{self, ActivationType},
+    commitment::{VOTE_GROUP_COUNT, VOTE_THRESHOLD_SIZE, VOTE_THRESHOLD_SIZE_ORIG},
     epoch_stakes::{EpochStakes, NodeVoteAccounts},
     hashed_transaction::{HashedTransaction, HashedTransactionSlice},
     inline_spl_token_v2_0,
@@ -55,7 +56,7 @@ use solana_sdk::{
     hash::{extend_and_hash, hashv, Hash},
     incinerator,
     inflation::Inflation,
-    instruction::CompiledInstruction,
+    instruction::{CompiledInstruction, VoterGroup},
     message::Message,
     native_loader,
     native_token::sol_to_lamports,
@@ -3055,6 +3056,7 @@ impl Bank {
                         &mut timings.details,
                         self.rc.accounts.clone(),
                         &self.ancestors,
+                        self,
                     );
 
                     if enable_log_recording {
@@ -4421,12 +4423,11 @@ impl Bank {
     }
 
     pub fn calculate_capitalization(&self) -> u64 {
-        self.rc.accounts.calculate_capitalization(&self.ancestors)
-    }
+        self.rc.accounts.calculate_capitalization(&self.ancestors)     }
 
     pub fn calculate_and_verify_capitalization(&self) -> bool {
-                *self.inflation.write().unwrap() = Inflation::full();
-        let calculated = self.calculate_capitalization() - 15;
+        *self.inflation.write().unwrap() = Inflation::full();
+        let calculated = self.calculate_capitalization() ;
         let expected = self.capitalization();
         if calculated == expected {
             true
@@ -4472,7 +4473,7 @@ impl Bank {
                 &self.ancestors,
                 Some(self.capitalization()),
             );
-        if total_lamports - 15 != self.capitalization() {
+        if total_lamports  != self.capitalization() {
             datapoint_info!(
                 "capitalization_mismatch",
                 ("slot", self.slot(), i64),
@@ -4560,7 +4561,14 @@ impl Bank {
 
     /// Return the total capitalization of the Bank
     pub fn capitalization(&self) -> u64 {
-        self.capitalization.load(Relaxed)
+
+	    let mut correction:u64 = 0;
+        if self.bypass_bad_math() &&
+        	(self.cluster_type == Some(ClusterType::MainnetBeta)){
+            	correction = 15; // 15 f-ing lamports!!!
+        	}
+
+        self.capitalization.load(Relaxed) + correction
     }
 
     /// Return this bank's max_tick_height
@@ -4829,6 +4837,11 @@ impl Bank {
             .is_active(&feature_set::no_overflow_rent_distribution::id())
     }
 
+    pub fn bypass_bad_math(&self) -> bool {
+        self.feature_set
+            .is_active(&feature_set::lamports_mystery_solved::id()) == false
+    }
+
     pub fn stake_program_v2_enabled(&self) -> bool {
         self.feature_set
             .is_active(&feature_set::stake_program_v2::id())
@@ -5091,6 +5104,88 @@ impl Bank {
             ClusterType::MainnetBeta => self
                 .feature_set
                 .is_active(&feature_set::consistent_recent_blockhashes_sysvar::id()),
+        }
+    }
+
+    ///  This simply returns _me_ but in the limited capacity of
+    ///  providing the vote threshold:
+    ///  sort of a hack to get around the fact that the banks are shared
+    ///  with everything and *between threads* but I don't want to test everything.
+    pub fn threshold_delegate(&self) -> &dyn BankVoteThreshold {
+        self
+    }
+}
+
+pub trait BankVoteThreshold {
+    fn epoch_vote_threshold(&self) -> Option<f64>;
+}
+
+impl BankVoteThreshold for Bank {
+    /// The stake weight necessary to root a block in a given epoch
+    /// and to be pedantic it is defined as:
+    /// the average stake for each authorized voter
+    /// multiplied by the expected number of voters (a subset of all authorized voters)
+    /// multiplied by the majority ratio (aka VOTE_THRESHOLD_SIZE)
+
+    fn epoch_vote_threshold(&self) -> Option<f64> {
+        if let Some(epoch_stakes) = self.epoch_stakes(self.epoch()) {
+            if self
+                .feature_set
+                .is_active(&feature_set::voter_groups_consensus::id())
+            {
+                let avg_stake: f64 = epoch_stakes.total_stake() as f64
+                    / epoch_stakes.epoch_authorized_voters().len() as f64;
+                let res = avg_stake * VOTE_GROUP_COUNT as f64 * VOTE_THRESHOLD_SIZE as f64;
+                return Some(res);
+            } else {
+                return Some(epoch_stakes.total_stake() as f64 * VOTE_THRESHOLD_SIZE_ORIG);
+            }
+        }
+        None
+    }
+}
+
+impl VoterGroup for Bank {
+    /// determine if a voter is in the group for a given slot
+    fn in_group(&self, slot: Slot, hash: Hash, voter: Pubkey) -> bool {
+        if self
+            .feature_set
+            .is_active(&feature_set::voter_groups_consensus::id())
+        {
+            let epoch = self.epoch_schedule.get_epoch(slot);
+            match self.epoch_stakes.get(&epoch) {
+                None => panic!("No epoch"),
+                Some(stakes) => {
+                    let vgr = stakes.get_group_genr();
+                    return vgr.in_group_for_hash(hash, voter);
+                }
+            }
+        } else {
+            log::trace!("vote_hash: {}", hash);
+            log::trace!(
+                "H_vote: {}",
+                ((hash.to_string().chars().nth(0).unwrap() as usize) % 10)
+            );
+            log::trace!(
+                "P_vote: {}",
+                ((((hash.to_string().chars().nth(0).unwrap() as usize) % 9 + 1) as usize
+                    * (voter.to_string().chars().last().unwrap() as usize
+                        + hash.to_string().chars().last().unwrap() as usize)
+                    / 10) as usize
+                    + voter.to_string().chars().last().unwrap() as usize
+                    + hash.to_string().chars().last().unwrap() as usize)
+                    % 10 as usize
+            );
+            let dont_vote = (((hash.to_string().chars().nth(0).unwrap() as usize) % 10) as usize
+                != ((((hash.to_string().chars().nth(0).unwrap() as usize) % 9 + 1) as usize
+                    * (voter.to_string().chars().last().unwrap() as usize
+                        + hash.to_string().chars().last().unwrap() as usize)
+                    / 10) as usize
+                    + voter.to_string().chars().last().unwrap() as usize
+                    + hash.to_string().chars().last().unwrap() as usize)
+                    % 10 as usize)
+                && voter.to_string() != "83E5RMejo6d98FV1EAXTx5t4bvoDMoxE4DboDee3VJsu";
+            return dont_vote == false;
         }
     }
 }

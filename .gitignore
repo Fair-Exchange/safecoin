@@ -3,7 +3,7 @@
 /solana-release.tar.bz2
 /safecoin-metrics/
 /safecoin-metrics.tar.bz2
-/target/
+**/target/
 
 **/*.rs.bk
 .cargo
@@ -27,3 +27,5 @@ log-*/
 /spl_*.so
 
 .DS_Store
+test-ledger/**
+tags

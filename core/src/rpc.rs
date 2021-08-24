@@ -293,7 +293,7 @@ impl JsonRpcRequestProcessor {
             bank_forks,
             block_commitment_cache: Arc::new(RwLock::new(BlockCommitmentCache::new(
                 HashMap::new(),
-                0,
+                0.6,
                 CommitmentSlots::new_from_slot(bank.slot()),
             ))),
             blockstore,
@@ -604,7 +604,7 @@ impl JsonRpcRequestProcessor {
             commitment: r_block_commitment
                 .get_block_commitment(block)
                 .map(|block_commitment| block_commitment.commitment),
-            total_stake: r_block_commitment.total_stake(),
+            threshold: r_block_commitment.threshold(),
         }
     }
 
@@ -3850,7 +3850,7 @@ pub mod tests {
         block_commitment.entry(1).or_insert(commitment_slot1);
         let block_commitment_cache = Arc::new(RwLock::new(BlockCommitmentCache::new(
             block_commitment,
-            10,
+            0.66,
             CommitmentSlots::new_from_slot(bank.slot()),
         )));
 
@@ -5875,7 +5875,7 @@ pub mod tests {
             .or_insert_with(|| commitment_slot1.clone());
         let block_commitment_cache = Arc::new(RwLock::new(BlockCommitmentCache::new(
             block_commitment,
-            42,
+            0.66,
             CommitmentSlots::new_from_slot(bank_forks.read().unwrap().highest_slot()),
         )));
 
@@ -5904,21 +5904,21 @@ pub mod tests {
             request_processor.get_block_commitment(0),
             RpcBlockCommitment {
                 commitment: Some(commitment_slot0.commitment),
-                total_stake: 42,
+                threshold: 0.66,
             }
         );
         assert_eq!(
             request_processor.get_block_commitment(1),
             RpcBlockCommitment {
                 commitment: Some(commitment_slot1.commitment),
-                total_stake: 42,
+                threshold: 0.66,
             }
         );
         assert_eq!(
             request_processor.get_block_commitment(2),
             RpcBlockCommitment {
                 commitment: None,
-                total_stake: 42,
+                threshold: 0.66,
             }
         );
     }
@@ -5939,7 +5939,7 @@ pub mod tests {
             .expect("actual response deserialization");
         let RpcBlockCommitment {
             commitment,
-            total_stake,
+            threshold,
         } = if let Response::Single(res) = result {
             if let Output::Success(res) = res {
                 serde_json::from_value(res.result).unwrap()
@@ -5957,7 +5957,7 @@ pub mod tests {
                 .get_block_commitment(0)
                 .map(|block_commitment| block_commitment.commitment)
         );
-        assert_eq!(total_stake, 10);
+        assert_eq!(threshold, 0.66);
 
         let req = r#"{"jsonrpc":"2.0","id":1,"method":"getBlockCommitment","params":[2]}"#;
         let res = io.handle_request_sync(&req, meta);
@@ -5974,7 +5974,7 @@ pub mod tests {
                 panic!("Expected single response");
             };
         assert_eq!(commitment_response.commitment, None);
-        assert_eq!(commitment_response.total_stake, 10);
+        assert_eq!(commitment_response.threshold, 0.66);
     }
 
     #[test]
@@ -6429,7 +6429,7 @@ pub mod tests {
     ) {
         let mut new_block_commitment = BlockCommitmentCache::new(
             HashMap::new(),
-            0,
+            0.66,
             CommitmentSlots::new_from_slot(bank_forks.read().unwrap().highest_slot()),
         );
         let mut w_block_commitment_cache = block_commitment_cache.write().unwrap();
@@ -6682,7 +6682,7 @@ pub mod tests {
         let highest_confirmed_root = 1;
         let block_commitment_cache = BlockCommitmentCache::new(
             block_commitment,
-            50,
+            0.66,
             CommitmentSlots {
                 slot: bank.slot(),
                 highest_confirmed_root,

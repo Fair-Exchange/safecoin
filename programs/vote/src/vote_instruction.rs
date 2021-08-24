@@ -361,6 +361,7 @@ pub fn process_instruction(
                 &from_keyed_account::<Clock>(next_keyed_account(keyed_accounts)?)?,
                 &vote,
                 &signers,
+                invoke_context.voter_group(),
             )
         }
         VoteInstruction::Withdraw(lamports) => {
@@ -546,6 +547,7 @@ mod tests {
             Err(InstructionError::InvalidAccountData),
         );
     }
+
 
     #[test]
     fn test_vote_authorize_checked() {

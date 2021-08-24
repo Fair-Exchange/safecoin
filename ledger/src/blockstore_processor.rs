@@ -20,10 +20,10 @@ use solana_runtime::{
     bank::{
         Bank, ExecuteTimings, InnerInstructionsList, RentDebits, TransactionBalancesSet,
         TransactionExecutionResult, TransactionLogMessages, TransactionResults,
+        BankVoteThreshold,
     },
     bank_forks::BankForks,
     bank_utils,
-    commitment::VOTE_THRESHOLD_SIZE,
     transaction_batch::TransactionBatch,
     vote_account::ArcVoteAccount,
     vote_sender_types::ReplayVoteSender,
@@ -971,45 +971,51 @@ fn load_frozen_forks(
             // If we've reached the last known root in blockstore, start looking
             // for newer cluster confirmed roots
             let new_root_bank = {
-                if *root >= max_root {
-                    supermajority_root_from_vote_accounts(
-                        bank.slot(),
-                        bank.total_epoch_stake(),
-                        bank.vote_accounts(),
-                    ).and_then(|supermajority_root| {
-                        if supermajority_root > *root {
-                            // If there's a cluster confirmed root greater than our last
-                            // replayed root, then because the cluster confirmed root should
-                            // be descended from our last root, it must exist in `all_banks`
-                            let cluster_root_bank = all_banks.get(&supermajority_root).unwrap();
 
-                            // cluster root must be a descendant of our root, otherwise something
-                            // is drastically wrong
-                            assert!(cluster_root_bank.ancestors.contains_key(root));
-                            info!("blockstore processor found new cluster confirmed root: {}, observed in bank: {}", cluster_root_bank.slot(), bank.slot());
+                if let Some(vote_threshold) = bank.epoch_vote_threshold() {
+                    if *root == max_root {
+                        supermajority_root_from_vote_accounts(
+                             bank.slot(),
+                              vote_threshold,
+                              bank.vote_accounts(),
+                        ).and_then(|supermajority_root| {
+                            if supermajority_root > *root {
+                                    // If there's a cluster confirmed root greater than our last
+                                    // replayed root, then beccause the cluster confirmed root should
+                                    // be descended from our last root, it must exist in `all_banks`
+                                    let cluster_root_bank = all_banks.get(&supermajority_root).unwrap();
+        
+                                    // cluster root must be a descendant of our root, otherwise something
+                                    // is drastically wrong
+                                    assert!(cluster_root_bank.ancestors.contains_key(root));
+                                    info!("blockstore processor found new cluster confirmed root: {}, observed in bank: {}", cluster_root_bank.slot(), bank.slot());
+                                    // Ensure cluster-confirmed root and parents are set as root in blockstore
+                                    let mut rooted_slots = vec![];
+                                    let mut new_root_bank = cluster_root_bank.clone();
+                                    loop {
+                                        if new_root_bank.slot() == *root { break; } // Found the last root in the chain, yay!
+                                        assert!(new_root_bank.slot() > *root);
 
-                            // Ensure cluster-confirmed root and parents are set as root in blockstore
-                            let mut rooted_slots = vec![];
-                            let mut new_root_bank = cluster_root_bank.clone();
-                            loop {
-                                if new_root_bank.slot() == *root { break; } // Found the last root in the chain, yay!
-                                assert!(new_root_bank.slot() > *root);
-
-                                rooted_slots.push(new_root_bank.slot());
-                                // As noted, the cluster confirmed root should be descended from
-                                // our last root; therefore parent should be set
-                                new_root_bank = new_root_bank.parent().unwrap();
-                            }
-                            inc_new_counter_info!("load_frozen_forks-cluster-confirmed-root", rooted_slots.len());
-                            blockstore.set_roots(&rooted_slots).expect("Blockstore::set_roots should succeed");
-                            Some(cluster_root_bank)
+                                        rooted_slots.push(new_root_bank.slot());
+                                        // As noted, the cluster confirmed root should be descended from
+                                        // our last root; therefore parent should be set
+                                        new_root_bank = new_root_bank.parent().unwrap();
+                                    }   
+                                    inc_new_counter_info!("load_frozen_forks-cluster-confirmed-root", rooted_slots.len());
+                                    blockstore.set_roots(&rooted_slots).expect("Blockstore::set_roots should succeed");
+                                    Some(cluster_root_bank)
+                                } else {
+                                    None
+                                }
+                            })
+                        } else if blockstore.is_root(slot) {
+                            Some(&bank)
                         } else {
                             None
                         }
-                    })
-                } else if blockstore.is_root(slot) {
-                    Some(&bank)
-                } else {
+                    }
+                
+                else {
                     None
                 }
             };
@@ -1064,7 +1070,7 @@ fn load_frozen_forks(
 }
 
 // `roots` is sorted largest to smallest by root slot
-fn supermajority_root(roots: &[(Slot, u64)], total_epoch_stake: u64) -> Option<Slot> {
+fn supermajority_root(roots: &[(Slot, u64)], vote_threshold_size: f64) -> Option<Slot> {
     if roots.is_empty() {
         return None;
     }
@@ -1075,7 +1081,7 @@ fn supermajority_root(roots: &[(Slot, u64)], total_epoch_stake: u64) -> Option<S
     for (root, stake) in roots.iter() {
         assert!(*root <= prev_root);
         total += stake;
-        if total as f64 / total_epoch_stake as f64 > VOTE_THRESHOLD_SIZE {
+        if total as f64 > vote_threshold_size {
             return Some(*root);
         }
         prev_root = *root;
@@ -1086,7 +1092,7 @@ fn supermajority_root(roots: &[(Slot, u64)], total_epoch_stake: u64) -> Option<S
 
 fn supermajority_root_from_vote_accounts<I>(
     bank_slot: Slot,
-    total_epoch_stake: u64,
+    epoch_threshold: f64,
     vote_accounts: I,
 ) -> Option<Slot>
 where
@@ -1116,7 +1122,7 @@ where
     roots_stakes.sort_unstable_by(|a, b| a.0.cmp(&b.0).reverse());
 
     // Find latest root
-    supermajority_root(&roots_stakes, total_epoch_stake)
+    supermajority_root(&roots_stakes, epoch_threshold)
 }
 
 // Processes and replays the contents of a single slot, returns Error
@@ -3448,19 +3454,18 @@ pub mod tests {
                     .collect_vec()
             };
 
-        let total_stake = 10;
         let slot = 100;
 
         // Supermajority root should be None
         assert!(
-            supermajority_root_from_vote_accounts(slot, total_stake, std::iter::empty()).is_none()
+            supermajority_root_from_vote_accounts(slot, 0.6, std::iter::empty()).is_none()
         );
 
         // Supermajority root should be None
         let roots_stakes = vec![(8, 1), (3, 1), (4, 1), (8, 1)];
         let accounts = convert_to_vote_accounts(roots_stakes);
         assert!(
-            supermajority_root_from_vote_accounts(slot, total_stake, accounts.into_iter())
+            supermajority_root_from_vote_accounts(slot, 0.6, accounts.into_iter())
                 .is_none()
         );
 
@@ -3468,7 +3473,7 @@ pub mod tests {
         let roots_stakes = vec![(8, 1), (3, 1), (4, 1), (8, 5)];
         let accounts = convert_to_vote_accounts(roots_stakes);
         assert_eq!(
-            supermajority_root_from_vote_accounts(slot, total_stake, accounts.into_iter()).unwrap(),
+            supermajority_root_from_vote_accounts(slot, 0.6, accounts.into_iter()).unwrap(),
             4
         );
 
@@ -3476,7 +3481,7 @@ pub mod tests {
         let roots_stakes = vec![(8, 1), (3, 1), (4, 1), (8, 6)];
         let accounts = convert_to_vote_accounts(roots_stakes);
         assert_eq!(
-            supermajority_root_from_vote_accounts(slot, total_stake, accounts.into_iter()).unwrap(),
+            supermajority_root_from_vote_accounts(slot, 0.6, accounts.into_iter()).unwrap(),
             8
         );
     }
