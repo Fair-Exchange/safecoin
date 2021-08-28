@@ -31,7 +31,7 @@ pub struct Response<T> {
 #[serde(rename_all = "camelCase")]
 pub struct RpcBlockCommitment<T> {
     pub commitment: Option<T>,
-    pub total_stake: u64,
+    pub threshold: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

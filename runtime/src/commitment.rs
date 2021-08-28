@@ -2,7 +2,9 @@ use solana_sdk::{clock::Slot, commitment_config::CommitmentLevel};
 use solana_vote_program::vote_state::MAX_LOCKOUT_HISTORY;
 use std::collections::HashMap;
 
-pub const VOTE_THRESHOLD_SIZE: f64 = 1f64 / 40f64;
+pub const VOTE_THRESHOLD_SIZE: f64 = 2f64 / 3f64;
+pub const VOTE_THRESHOLD_SIZE_ORIG: f64 = 1f64 / 40f64;
+pub const VOTE_GROUP_COUNT: usize = 11; // the maximum number of voters we need to vote (solana has *everybody* vote) 
 
 pub type BlockCommitmentArray = [u64; MAX_LOCKOUT_HISTORY + 1];
 
@@ -45,14 +47,14 @@ pub struct BlockCommitmentCache {
     /// the struct to avoid the expense of recalculating on every call.
     commitment_slots: CommitmentSlots,
     /// Total stake active during the bank's epoch
-    total_stake: u64,
+    threshold: f64,
 }
 
 impl std::fmt::Debug for BlockCommitmentCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BlockCommitmentCache")
             .field("block_commitment", &self.block_commitment)
-            .field("total_stake", &self.total_stake)
+            .field("threshold", &self.threshold)
             .field(
                 "bank",
                 &format_args!("Bank({{current_slot: {:?}}})", self.commitment_slots.slot),
@@ -65,22 +67,23 @@ impl std::fmt::Debug for BlockCommitmentCache {
 impl BlockCommitmentCache {
     pub fn new(
         block_commitment: HashMap<Slot, BlockCommitment>,
-        total_stake: u64,
+        threshold: f64,
         commitment_slots: CommitmentSlots,
     ) -> Self {
-        Self {
-            block_commitment,
-            commitment_slots,
-            total_stake,
-        }
+            Self {
+                block_commitment,
+                commitment_slots,
+                threshold,
+            }
+       
     }
 
     pub fn get_block_commitment(&self, slot: Slot) -> Option<&BlockCommitment> {
         self.block_commitment.get(&slot)
     }
 
-    pub fn total_stake(&self) -> u64 {
-        self.total_stake
+    pub fn threshold(&self) -> f64 {
+        self.threshold
     }
 
     pub fn slot(&self) -> Slot {
@@ -137,9 +140,8 @@ impl BlockCommitmentCache {
     pub fn calculate_highest_confirmed_slot(&self) -> Slot {
         self.highest_slot_with_confirmation_count(1)
     }
-
     pub fn get_confirmation_count(&self, slot: Slot) -> Option<usize> {
-        self.get_lockout_count(slot, VOTE_THRESHOLD_SIZE)
+        self.get_lockout_count(slot, self.threshold)
     }
 
     // Returns the lowest level at which at least `minimum_stake_percentage` of the total epoch
@@ -150,7 +152,7 @@ impl BlockCommitmentCache {
             let mut sum = 0;
             for (i, stake) in iterator {
                 sum += stake;
-                if (sum as f64 / self.total_stake as f64) > minimum_stake_percentage {
+                if sum as f64  > minimum_stake_percentage {
                     return i + 1;
                 }
             }
@@ -163,7 +165,7 @@ impl BlockCommitmentCache {
         block_commitment.insert(0, BlockCommitment::default());
         Self {
             block_commitment,
-            total_stake: 42,
+            threshold: 0.6,
             ..Self::default()
         }
     }
@@ -173,7 +175,7 @@ impl BlockCommitmentCache {
         block_commitment.insert(0, BlockCommitment::default());
         Self {
             block_commitment,
-            total_stake: 42,
+            threshold: 0.6,
             commitment_slots: CommitmentSlots {
                 slot,
                 root,
@@ -260,7 +262,7 @@ mod tests {
         block_commitment.entry(2).or_insert(cache2);
         let block_commitment_cache = BlockCommitmentCache {
             block_commitment,
-            total_stake: 50,
+            threshold: 0.6,
             ..BlockCommitmentCache::default()
         };
 
@@ -273,7 +275,6 @@ mod tests {
     #[test]
     fn test_highest_confirmed_slot() {
         let bank_slot_5 = 5;
-        let total_stake = 50;
 
         // Build cache with confirmation_count 2 given total_stake
         let mut cache0 = BlockCommitment::default();
@@ -296,7 +297,7 @@ mod tests {
         block_commitment.entry(3).or_insert_with(|| cache2.clone()); // Slot 3, conf 0
         let commitment_slots = CommitmentSlots::new_from_slot(bank_slot_5);
         let block_commitment_cache =
-            BlockCommitmentCache::new(block_commitment, total_stake, commitment_slots);
+            BlockCommitmentCache::new(block_commitment, 0.6, commitment_slots);
 
         assert_eq!(block_commitment_cache.calculate_highest_confirmed_slot(), 2);
 
@@ -306,7 +307,7 @@ mod tests {
         block_commitment.entry(2).or_insert_with(|| cache1.clone()); // Slot 2, conf 1
         block_commitment.entry(3).or_insert_with(|| cache2.clone()); // Slot 3, conf 0
         let block_commitment_cache =
-            BlockCommitmentCache::new(block_commitment, total_stake, commitment_slots);
+            BlockCommitmentCache::new(block_commitment, 0.66, commitment_slots);
 
         assert_eq!(block_commitment_cache.calculate_highest_confirmed_slot(), 2);
 
@@ -316,7 +317,7 @@ mod tests {
         block_commitment.entry(3).or_insert(cache1); // Slot 3, conf 1
         block_commitment.entry(5).or_insert_with(|| cache2.clone()); // Slot 5, conf 0
         let block_commitment_cache =
-            BlockCommitmentCache::new(block_commitment, total_stake, commitment_slots);
+            BlockCommitmentCache::new(block_commitment, 0.66, commitment_slots);
 
         assert_eq!(block_commitment_cache.calculate_highest_confirmed_slot(), 3);
 
@@ -326,7 +327,7 @@ mod tests {
         block_commitment.entry(2).or_insert_with(|| cache2.clone()); // Slot 2, conf 0
         block_commitment.entry(3).or_insert_with(|| cache2.clone()); // Slot 3, conf 0
         let block_commitment_cache =
-            BlockCommitmentCache::new(block_commitment, total_stake, commitment_slots);
+            BlockCommitmentCache::new(block_commitment, 0.6, commitment_slots);
 
         assert_eq!(block_commitment_cache.calculate_highest_confirmed_slot(), 1);
 
@@ -336,7 +337,7 @@ mod tests {
         block_commitment.entry(2).or_insert_with(|| cache2.clone()); // Slot 2, conf 0
         block_commitment.entry(3).or_insert(cache2); // Slot 3, conf 0
         let block_commitment_cache =
-            BlockCommitmentCache::new(block_commitment, total_stake, commitment_slots);
+            BlockCommitmentCache::new(block_commitment, 0.6, commitment_slots);
 
         assert_eq!(block_commitment_cache.calculate_highest_confirmed_slot(), 0);
     }

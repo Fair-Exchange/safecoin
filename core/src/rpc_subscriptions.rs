@@ -1666,7 +1666,7 @@ pub(crate) mod tests {
         block_commitment.entry(1).or_insert(cache1);
         let block_commitment_cache = BlockCommitmentCache::new(
             block_commitment,
-            10,
+            0.66,
             CommitmentSlots {
                 slot: bank1.slot(),
                 ..CommitmentSlots::default()

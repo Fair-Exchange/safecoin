@@ -1,6 +1,7 @@
-use crate::{stakes::Stakes, vote_account::ArcVoteAccount};
+use crate::{stakes::Stakes, vote_account::ArcVoteAccount,commitment::VOTE_GROUP_COUNT,vote_group_gen::VoteGroupGenerator};
 use serde::{Deserialize, Serialize};
 use solana_sdk::{clock::Epoch, pubkey::Pubkey};
+
 use std::{collections::HashMap, sync::Arc};
 
 pub type NodeIdToVoteAccounts = HashMap<Pubkey, NodeVoteAccounts>;
@@ -18,20 +19,32 @@ pub struct EpochStakes {
     total_stake: u64,
     node_id_to_vote_accounts: Arc<NodeIdToVoteAccounts>,
     epoch_authorized_voters: Arc<EpochAuthorizedVoters>,
+    vote_group_gen: VoteGroupGenerator,
 }
 
 impl EpochStakes {
     pub fn new(stakes: &Stakes, leader_schedule_epoch: Epoch) -> Self {
         let epoch_vote_accounts = Stakes::vote_accounts(stakes);
         let (total_stake, node_id_to_vote_accounts, epoch_authorized_voters) =
-            Self::parse_epoch_vote_accounts(&epoch_vote_accounts, leader_schedule_epoch);
-        Self {
+            Self::parse_epoch_vote_accounts(&epoch_vote_accounts, leader_schedule_epoch);  
+            let group_size = 
+            if epoch_authorized_voters.len() < VOTE_GROUP_COUNT 
+                { epoch_authorized_voters.len()} 
+            else 
+                { VOTE_GROUP_COUNT }; 
+            let gen : VoteGroupGenerator = VoteGroupGenerator::new(&epoch_authorized_voters,group_size) ;
+            Self {
             stakes: Arc::new(stakes.clone()),
             total_stake,
             node_id_to_vote_accounts: Arc::new(node_id_to_vote_accounts),
             epoch_authorized_voters: Arc::new(epoch_authorized_voters),
-        }
+            vote_group_gen: gen,
+       }
     }
+    pub fn get_group_genr(&self) -> &VoteGroupGenerator {
+        &self.vote_group_gen
+    }
+
 
     pub fn stakes(&self) -> &Stakes {
         &self.stakes
